@@ -1,0 +1,706 @@
+#!/bin/bash
+# claude-profiles - run separate Claude Desktop and Claude Code profiles
+# (work, personal, clients...) side by side on macOS.
+#
+# https://github.com/dav-ayman/claude-profiles
+# SPDX-License-Identifier: MIT
+#
+# Written for the stock macOS /bin/bash (3.2). Uses only tools that ship with
+# macOS: osascript, osacompile, sips, iconutil, codesign, plutil, PlistBuddy.
+
+set -Eeuo pipefail
+
+VERSION="1.0.0"
+
+# Internal tools always come from the system, never from a user PATH shim.
+USER_PATH="${PATH:-}"
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+umask 022
+
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+PLISTBUDDY="/usr/libexec/PlistBuddy"
+MANAGED_MARKER="managed-by: claude-profiles"
+BUNDLE_ID_PREFIX="io.github.dav-ayman.claude-profiles"
+DEFAULT_COLORS="2563EB 16A34A 9333EA DB2777 0891B2 CA8A04 DC2626 4F46E5"
+
+: "${HOME:?HOME is not set}"
+CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/claude-profiles"
+PROFILES_DIR="$CONFIG_ROOT/profiles"
+APPS_DIR="${CLAUDE_PROFILES_APPS_DIR:-$HOME/Applications}"
+BIN_DIR="${CLAUDE_PROFILES_BIN_DIR:-$HOME/.local/bin}"
+STOCK_DATA_DIR="$HOME/Library/Application Support/Claude"
+STOCK_CONFIG_DIR="$HOME/.claude"
+
+# ---------------------------------------------------------------- output
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_RED=$'\033[31m'; C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'; C_RESET=$'\033[0m'
+else
+  C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_RESET=""
+fi
+
+say()  { printf '%s\n' "$*"; }
+ok()   { printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+warn() { printf '%s!%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+die()  { printf '%serror:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
+
+# Show paths under $HOME as ~/...
+# shellcheck disable=SC2088  # the ~ is meant literally here
+pretty() {
+  case "$1" in
+    "$HOME") printf '~' ;;
+    "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# Single-quote a string for /bin/sh and bash.
+shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
+
+# One private scratch area per run, removed on exit.
+SCRATCH=""
+cleanup() { [ -z "$SCRATCH" ] || rm -rf "$SCRATCH"; }
+trap cleanup EXIT
+scratch_dir() {
+  [ -n "$SCRATCH" ] || SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/claude-profiles.XXXXXX")"
+  mktemp -d "$SCRATCH/build.XXXXXX"
+}
+
+# ---------------------------------------------------------------- paths
+
+script_dir() {
+  local src="${BASH_SOURCE[0]}" dir
+  while [ -L "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+lib_dir() {
+  local here; here="$(script_dir)"
+  if [ -n "${CLAUDE_PROFILES_LIB_DIR:-}" ]; then printf '%s' "$CLAUDE_PROFILES_LIB_DIR"
+  elif [ -f "$here/../lib/icon.js" ]; then (cd "$here/../lib" && pwd)
+  elif [ -f "$here/../share/claude-profiles/icon.js" ]; then (cd "$here/../share/claude-profiles" && pwd)
+  else die "cannot find icon.js next to $(pretty "$here"); reinstall claude-profiles"
+  fi
+}
+
+# Expand a leading ~ and require an absolute, single-line path.
+# shellcheck disable=SC2088  # matching a literal ~ typed by the user
+abs_path() {
+  local p="$1"
+  case "$p" in "~") p="$HOME" ;; "~/"*) p="$HOME/${p#"~/"}" ;; esac
+  case "$p" in /*) ;; *) die "path must be absolute: $1" ;; esac
+  case "$p" in *$'\n'*|*$'\r'*) die "path must not contain line breaks" ;; esac
+  while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+  [ "$p" != "/" ] && [ "$p" != "$HOME" ] || die "refusing to use $p as a profile folder"
+  printf '%s' "$p"
+}
+
+find_claude_app() {
+  local app
+  if [ -n "${CLAUDE_APP:-}" ]; then
+    [ -d "$CLAUDE_APP" ] || die "CLAUDE_APP does not exist: $CLAUDE_APP"
+    printf '%s' "$CLAUDE_APP"; return
+  fi
+  for app in "/Applications/Claude.app" "$HOME/Applications/Claude.app"; do
+    [ -d "$app" ] && { printf '%s' "$app"; return; }
+  done
+  app="$(mdfind "kMDItemCFBundleIdentifier == 'com.anthropic.claudefordesktop'" 2>/dev/null | head -n 1 || true)"
+  [ -n "$app" ] && [ -d "$app" ] && { printf '%s' "$app"; return; }
+  die "Claude Desktop not found. Install it from https://claude.ai/download (or set CLAUDE_APP)"
+}
+
+app_version() { "$PLISTBUDDY" -c "Print :CFBundleShortVersionString" "$1/Contents/Info.plist" 2>/dev/null || printf 'unknown'; }
+
+macos_major() { sw_vers -productVersion | cut -d. -f1; }
+
+# ---------------------------------------------------------------- profiles
+
+RE_NAME='^[a-z][a-z0-9-]{0,29}$'
+RE_LABEL='^[A-Za-z0-9][A-Za-z0-9 ._-]{0,29}$'
+RE_LETTER='^[A-Za-z0-9]$'
+RE_COLOR='^[0-9A-Fa-f]{6}$'
+valid_name()   { [[ $1 =~ $RE_NAME ]] && [[ $1 != *- ]]; }
+valid_label()  { [[ $1 =~ $RE_LABEL ]] && [[ $1 != *" " ]]; }
+valid_letter() { [[ $1 =~ $RE_LETTER ]]; }
+valid_color()  { [[ $1 =~ $RE_COLOR ]]; }
+
+profile_file() { printf '%s/%s.conf' "$PROFILES_DIR" "$1"; }
+
+profile_names() {
+  local f
+  [ -d "$PROFILES_DIR" ] || return 0
+  for f in "$PROFILES_DIR"/*.conf; do
+    [ -f "$f" ] || continue
+    f="${f##*/}"; printf '%s\n' "${f%.conf}"
+  done
+}
+
+# Plain key=value reader. Profile files are data, never sourced.
+conf_get() {
+  local file="$1" key="$2" line
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "$key="*) printf '%s' "${line#*=}"; return 0 ;; esac
+  done < "$file"
+  return 1
+}
+
+# Load a profile into P_* globals and re-validate everything read from disk.
+load_profile() {
+  local name="$1" f
+  valid_name "$name" || die "invalid profile name: $name"
+  f="$(profile_file "$name")"
+  [ -f "$f" ] || die "no profile named '$name' (see: claude-profiles list)"
+  P_NAME="$name"
+  P_LABEL="$(conf_get "$f" label || true)"
+  P_LETTER="$(conf_get "$f" letter || true)"
+  P_COLOR="$(conf_get "$f" color || true)"
+  P_DEFAULT="$(conf_get "$f" default || printf 0)"
+  P_DATA_DIR="$(conf_get "$f" data_dir || true)"
+  P_CONFIG_DIR="$(conf_get "$f" config_dir || true)"
+  P_DESKTOP="$(conf_get "$f" desktop || printf 1)"
+  P_CLI="$(conf_get "$f" cli || printf 1)"
+  if ! valid_label "$P_LABEL" || ! valid_letter "$P_LETTER" || ! valid_color "$P_COLOR"; then
+    die "profile file is damaged: $(pretty "$f")"
+  fi
+  P_DATA_DIR="$(abs_path "$P_DATA_DIR")"
+  P_CONFIG_DIR="$(abs_path "$P_CONFIG_DIR")"
+}
+
+save_profile() {
+  local f tmp
+  mkdir -p "$PROFILES_DIR"
+  f="$(profile_file "$P_NAME")"
+  tmp="$(mktemp "$PROFILES_DIR/.tmp.XXXXXX")"
+  {
+    printf '# %s\n' "$MANAGED_MARKER"
+    printf 'label=%s\nletter=%s\ncolor=%s\ndefault=%s\n' "$P_LABEL" "$P_LETTER" "$P_COLOR" "$P_DEFAULT"
+    printf 'data_dir=%s\nconfig_dir=%s\ndesktop=%s\ncli=%s\n' "$P_DATA_DIR" "$P_CONFIG_DIR" "$P_DESKTOP" "$P_CLI"
+  } > "$tmp"
+  mv -f "$tmp" "$f"
+}
+
+launcher_path() { printf '%s/Claude %s.app' "$APPS_DIR" "$P_LABEL"; }
+wrapper_path()  { printf '%s/claude-%s' "$BIN_DIR" "$P_NAME"; }
+
+is_managed_launcher() { [ -f "$1/Contents/Resources/claude-profiles.marker" ]; }
+is_managed_file()     { [ -f "$1" ] && grep -q "$MANAGED_MARKER" "$1" 2>/dev/null; }
+
+# Profiles that use the stock folders need no override at launch.
+uses_stock_data()   { [ "$P_DATA_DIR" = "$STOCK_DATA_DIR" ]; }
+uses_stock_config() { [ "$P_CONFIG_DIR" = "$STOCK_CONFIG_DIR" ]; }
+
+# Account signed in to the CLI profile (Claude Code keeps it in .claude.json).
+cli_account() {
+  local json
+  if uses_stock_config; then json="$HOME/.claude.json"; else json="$P_CONFIG_DIR/.claude.json"; fi
+  [ -f "$json" ] || return 1
+  plutil -extract oauthAccount.emailAddress raw -o - "$json" 2>/dev/null
+}
+
+# ---------------------------------------------------------------- running instances
+
+app_executable() {
+  local exe
+  exe="$("$PLISTBUDDY" -c "Print :CFBundleExecutable" "$1/Contents/Info.plist" 2>/dev/null)" || return 1
+  printf '%s/Contents/MacOS/%s' "$1" "$exe"
+}
+
+# PID of the running Desktop instance that belongs to this profile, if any.
+# Matching is literal (awk index), so paths with spaces or regex characters are safe.
+running_pid() {
+  local exe="$1" data_dir="$2"
+  ps -axww -o pid= -o command= | EXE="$exe" DATA="$data_dir" awk '
+    BEGIN { exe = ENVIRON["EXE"]; data = ENVIRON["DATA"]; arg = "--user-data-dir=" data }
+    {
+      pid = $1; cmd = $0; sub(/^[ \t]*[0-9]+[ \t]+/, "", cmd)
+      i = index(cmd, exe); if (i == 0) next
+      rest = substr(cmd, i + length(exe))
+      if (rest != "" && substr(rest, 1, 1) != " ") next
+      j = index(rest, "--user-data-dir=")
+      if (data == "") { if (j == 0 && found == "") found = pid; next }
+      k = index(rest, arg); if (k == 0) next
+      after = substr(rest, k + length(arg))
+      if ((after == "" || substr(after, 1, 2) == " -") && found == "") found = pid
+    }
+    END { if (found != "") print found }'
+}
+
+# CLAUDE_CONFIG_DIR of a running process. ps -E appends the environment as
+# space-separated NAME=value pairs, so the value runs until the next " NAME=".
+process_config_dir() {
+  ps -E -ww -o command= -p "$1" 2>/dev/null | awk '
+    {
+      i = index($0, " CLAUDE_CONFIG_DIR="); if (i == 0) next
+      v = substr($0, i + 19)
+      if (match(v, / [A-Za-z_][A-Za-z0-9_]*=/)) v = substr(v, 1, RSTART - 1)
+      print v
+    }' || true
+}
+
+# ---------------------------------------------------------------- generated files
+
+# launch.sh lives inside each launcher bundle, so a launcher keeps working
+# even if claude-profiles itself is uninstalled.
+write_launch_script() {
+  local out="$1" app="$2" data="" cfg=""
+  uses_stock_data || data="$P_DATA_DIR"
+  uses_stock_config || cfg="$P_CONFIG_DIR"
+  cat > "$out" <<EOF
+#!/bin/bash
+# $MANAGED_MARKER (profile: $P_NAME) - regenerate with: claude-profiles refresh $P_NAME
+set -u
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+APP=$(shq "$app")
+DATA_DIR=$(shq "$data")
+CONFIG_DIR=$(shq "$cfg")
+
+alert() {
+  /usr/bin/osascript -e 'on run argv' -e 'display alert "Claude Profiles" message (item 1 of argv) as critical' -e 'end run' "\$1" >/dev/null 2>&1 || true
+}
+
+[ -d "\$APP" ] || { alert "Claude Desktop was not found at \$APP. Reinstall it, then run: claude-profiles refresh"; exit 1; }
+EXE="\$APP/Contents/MacOS/\$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "\$APP/Contents/Info.plist")"
+
+PID="\$(ps -axww -o pid= -o command= | EXE="\$EXE" DATA="\$DATA_DIR" awk '
+  BEGIN { exe = ENVIRON["EXE"]; data = ENVIRON["DATA"]; arg = "--user-data-dir=" data }
+  {
+    pid = \$1; cmd = \$0; sub(/^[ \\t]*[0-9]+[ \\t]+/, "", cmd)
+    i = index(cmd, exe); if (i == 0) next
+    rest = substr(cmd, i + length(exe))
+    if (rest != "" && substr(rest, 1, 1) != " ") next
+    j = index(rest, "--user-data-dir=")
+    if (data == "") { if (j == 0 && found == "") found = pid; next }
+    k = index(rest, arg); if (k == 0) next
+    after = substr(rest, k + length(arg))
+    if ((after == "" || substr(after, 1, 2) == " -") && found == "") found = pid
+  }
+  END { if (found != "") print found }')"
+
+if [ -n "\$PID" ]; then
+  # Already running: bring this profile's window forward (no extra permissions needed).
+  /usr/bin/osascript -l JavaScript -e "ObjC.import('AppKit'); var a = \\\$.NSRunningApplication.runningApplicationWithProcessIdentifier(\$PID); if (a) a.activateWithOptions(2);" >/dev/null 2>&1 || true
+  exit 0
+fi
+
+# 'open' forwards the caller's environment, so clear CLAUDE_CONFIG_DIR first.
+if [ -n "\$CONFIG_DIR" ]; then set -- --env "CLAUDE_CONFIG_DIR=\$CONFIG_DIR"; else set --; fi
+if [ -n "\$DATA_DIR" ]; then
+  exec /usr/bin/env -u CLAUDE_CONFIG_DIR /usr/bin/open -n "\$@" -a "\$APP" --args "--user-data-dir=\$DATA_DIR"
+else
+  exec /usr/bin/env -u CLAUDE_CONFIG_DIR /usr/bin/open -n "\$@" -a "\$APP"
+fi
+EOF
+  chmod 755 "$out"
+}
+
+write_wrapper() {
+  local out="$1"
+  {
+    printf '#!/bin/sh\n'
+    printf '# %s (profile: %s) - Claude Code CLI with the %s profile\n' "$MANAGED_MARKER" "$P_NAME" "$P_LABEL"
+    if uses_stock_config; then
+      printf 'unset CLAUDE_CONFIG_DIR\n'
+    else
+      printf 'CLAUDE_CONFIG_DIR=%s\nexport CLAUDE_CONFIG_DIR\n' "$(shq "$P_CONFIG_DIR")"
+    fi
+    # shellcheck disable=SC2016  # expanded by the wrapper at run time, not here
+    printf 'exec "${CLAUDE_PROFILES_CLAUDE_BIN:-claude}" "$@"\n'
+  } > "$out"
+  chmod 755 "$out"
+}
+
+make_icon() {
+  local app="$1" out_icns="$2" work="$3" style png set s
+  style="${CLAUDE_PROFILES_ICON_STYLE:-}"
+  if [ -z "$style" ]; then
+    if [ "$(macos_major)" -ge 26 ]; then style="bleed"; else style="tile"; fi
+  fi
+  png="$work/icon.png"; set="$work/icon.iconset"
+  osascript -l JavaScript "$(lib_dir)/icon.js" "$app" "$png" "$P_LETTER" "$P_COLOR" "$style" >/dev/null || return 1
+  mkdir -p "$set"
+  for s in 16 32 128 256 512; do
+    sips -z "$s" "$s" "$png" --out "$set/icon_${s}x${s}.png" >/dev/null
+    sips -z $((s * 2)) $((s * 2)) "$png" --out "$set/icon_${s}x${s}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$set" -o "$out_icns"
+}
+
+build_launcher() {
+  local app="$1" dest work bundle plist
+  dest="$(launcher_path)"
+  if [ -e "$dest" ] && ! is_managed_launcher "$dest"; then
+    die "$(pretty "$dest") exists and was not made by claude-profiles; move it away first"
+  fi
+  mkdir -p "$APPS_DIR"
+  work="$(scratch_dir)"
+  bundle="$work/Claude $P_LABEL.app"
+
+  local out
+  if ! out="$(osacompile -o "$bundle" \
+    -e 'do shell script "/bin/bash " & quoted form of ((POSIX path of (path to me)) & "Contents/Resources/launch.sh") & " >/dev/null 2>&1 &"' 2>&1)"; then
+    die "osacompile failed: $out"
+  fi
+  plist="$bundle/Contents/Info.plist"
+  write_launch_script "$bundle/Contents/Resources/launch.sh" "$app"
+  printf '%s\nprofile=%s\nversion=%s\n' "$MANAGED_MARKER" "$P_NAME" "$VERSION" > "$bundle/Contents/Resources/claude-profiles.marker"
+
+  if make_icon "$app" "$work/badge.icns" "$work"; then
+    cp "$work/badge.icns" "$bundle/Contents/Resources/applet.icns"
+  else
+    warn "could not draw the badge icon; using Claude's own icon"
+    cp "$app/Contents/Resources/"*.icns "$bundle/Contents/Resources/applet.icns" 2>/dev/null || true
+  fi
+  rm -f "$bundle/Contents/Resources/Assets.car"
+  "$PLISTBUDDY" -c "Delete :CFBundleIconName" "$plist" >/dev/null 2>&1 || true
+  "$PLISTBUDDY" -c "Set :CFBundleName Claude $P_LABEL" "$plist"
+  "$PLISTBUDDY" -c "Add :CFBundleDisplayName string Claude $P_LABEL" "$plist" >/dev/null 2>&1 \
+    || "$PLISTBUDDY" -c "Set :CFBundleDisplayName Claude $P_LABEL" "$plist"
+  "$PLISTBUDDY" -c "Add :CFBundleIdentifier string $BUNDLE_ID_PREFIX.$P_NAME" "$plist" >/dev/null 2>&1 \
+    || "$PLISTBUDDY" -c "Set :CFBundleIdentifier $BUNDLE_ID_PREFIX.$P_NAME" "$plist"
+  "$PLISTBUDDY" -c "Add :LSUIElement bool true" "$plist" >/dev/null 2>&1 || true
+  codesign --force --deep --sign - "$bundle" >/dev/null 2>&1
+  codesign --verify "$bundle" >/dev/null 2>&1 || die "launcher failed signature check"
+
+  rm -rf "$dest"
+  mv "$bundle" "$dest"
+  touch "$dest"
+  [ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$dest" >/dev/null 2>&1 || true
+  rm -rf "$work"
+}
+
+install_wrapper() {
+  local dest; dest="$(wrapper_path)"
+  if [ -e "$dest" ] && ! is_managed_file "$dest"; then
+    die "$(pretty "$dest") exists and was not made by claude-profiles; move it away first"
+  fi
+  mkdir -p "$BIN_DIR"
+  write_wrapper "$dest.tmp.$$"
+  mv -f "$dest.tmp.$$" "$dest"
+}
+
+# PATH line to suggest, with $HOME left for the shell to expand.
+# shellcheck disable=SC2016  # $HOME/$PATH are for the user's shell
+path_hint() {
+  case "$BIN_DIR" in
+    "$HOME"/*) printf 'export PATH="$HOME/%s:$PATH"' "${BIN_DIR#"$HOME"/}" ;;
+    *) printf 'export PATH="%s:$PATH"' "$BIN_DIR" ;;
+  esac
+}
+
+bin_on_path() {
+  case ":$USER_PATH:" in *":$BIN_DIR:"*) return 0 ;; *) return 1 ;; esac
+}
+
+# ---------------------------------------------------------------- commands
+
+usage() {
+  cat <<EOF
+${C_BOLD}claude-profiles${C_RESET} $VERSION - separate Claude Desktop + Claude Code profiles on one Mac
+
+${C_BOLD}Usage${C_RESET}
+  claude-profiles add <name> [options]   create a profile (Desktop launcher + CLI command)
+  claude-profiles list                   show profiles
+  claude-profiles open <name>            start or focus that profile's Desktop app
+  claude-profiles refresh [name]         rebuild launchers, icons and CLI commands
+  claude-profiles remove <name> [--purge --yes]
+                                         delete a profile (--purge also deletes its data)
+  claude-profiles doctor                 check the setup and what is running
+  claude-profiles version | help
+
+${C_BOLD}Options for add${C_RESET}
+  --default            use Claude's normal folders (your existing sign-in); one profile only
+  --label <text>       app name shown as "Claude <label>"   (default: Name)
+  --letter <X>         badge letter                         (default: first letter)
+  --color <RRGGBB>     badge color                          (default: from a palette)
+  --data-dir <path>    Desktop data folder   (default: ~/Library/Application Support/Claude-<name>)
+  --config-dir <path>  Claude Code folder    (default: ~/.claude-<name>)
+  --no-desktop         skip the Desktop launcher
+  --no-cli             skip the claude-<name> command
+
+${C_BOLD}Example${C_RESET}
+  claude-profiles add work --default      # your current setup becomes "Claude Work"
+  claude-profiles add personal            # a second, fully separate profile
+  claude-personal                         # Claude Code, signed in to the personal account
+
+Launchers go to $(pretty "$APPS_DIR"), commands to $(pretty "$BIN_DIR").
+EOF
+}
+
+cmd_add() {
+  local name="" label="" letter="" color="" default=0 data_dir="" config_dir=""
+  local desktop=1 cli=1 other app="" i=0 c
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --default) default=1 ;;
+      --label) [ $# -ge 2 ] || die "--label needs a value"; label="$2"; shift ;;
+      --letter) [ $# -ge 2 ] || die "--letter needs a value"; letter="$2"; shift ;;
+      --color) [ $# -ge 2 ] || die "--color needs a value"; color="${2#\#}"; shift ;;
+      --data-dir) [ $# -ge 2 ] || die "--data-dir needs a value"; data_dir="$2"; shift ;;
+      --config-dir) [ $# -ge 2 ] || die "--config-dir needs a value"; config_dir="$2"; shift ;;
+      --no-desktop) desktop=0 ;;
+      --no-cli) cli=0 ;;
+      -h|--help) usage; return 0 ;;
+      -*) die "unknown option: $1" ;;
+      *) [ -z "$name" ] || die "only one profile name, got '$name' and '$1'"; name="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$name" ] || die "usage: claude-profiles add <name> [options]"
+  valid_name "$name" || die "profile name must be lowercase letters, digits or '-', start with a letter, max 30 chars"
+  [ ! -f "$(profile_file "$name")" ] || die "profile '$name' already exists (use: claude-profiles refresh $name)"
+  [ "$desktop" = 1 ] || [ "$cli" = 1 ] || die "--no-desktop and --no-cli together leave nothing to create"
+
+  [ -n "$label" ] || label="$(upper "${name:0:1}")${name:1}"
+  valid_label "$label" || die "label must be letters, digits, space . _ - (max 30 chars)"
+  [ -n "$letter" ] || letter="${name:0:1}"
+  valid_letter "$letter" || die "--letter must be a single letter or digit"
+  letter="$(upper "$letter")"
+  if [ -z "$color" ]; then
+    i=$(profile_names | wc -l | tr -d ' ')
+    for c in $DEFAULT_COLORS; do
+      [ "$i" -le 0 ] && { color="$c"; break; }
+      i=$((i - 1))
+    done
+    [ -n "$color" ] || color="${DEFAULT_COLORS%% *}"
+  fi
+  valid_color "$color" || die "--color must be 6 hex digits, like 2563EB"
+  color="$(upper "$color")"
+
+  if [ "$default" = 1 ]; then
+    for other in $(profile_names); do
+      [ "$(conf_get "$(profile_file "$other")" default || true)" = 1 ] && die "profile '$other' already uses the default folders"
+    done
+    [ -n "$data_dir" ] || data_dir="$STOCK_DATA_DIR"
+    [ -n "$config_dir" ] || config_dir="$STOCK_CONFIG_DIR"
+  fi
+  [ -n "$data_dir" ] || data_dir="$HOME/Library/Application Support/Claude-$name"
+  [ -n "$config_dir" ] || config_dir="$HOME/.claude-$name"
+  data_dir="$(abs_path "$data_dir")"; config_dir="$(abs_path "$config_dir")"
+
+  for other in $(profile_names); do
+    [ "$(conf_get "$(profile_file "$other")" data_dir || true)" != "$data_dir" ] \
+      || die "profile '$other' already uses $(pretty "$data_dir")"
+    [ "$(conf_get "$(profile_file "$other")" config_dir || true)" != "$config_dir" ] \
+      || die "profile '$other' already uses $(pretty "$config_dir")"
+    [ "$(conf_get "$(profile_file "$other")" label || true)" != "$label" ] \
+      || die "profile '$other' already uses the label '$label'"
+  done
+  if [ "$default" = 0 ]; then
+    [ "$data_dir" != "$STOCK_DATA_DIR" ] || die "only a --default profile may use Claude's normal data folder"
+    [ "$config_dir" != "$STOCK_CONFIG_DIR" ] || die "only a --default profile may use ~/.claude"
+  fi
+
+  P_NAME="$name"; P_LABEL="$label"; P_LETTER="$letter"; P_COLOR="$color"; P_DEFAULT="$default"
+  P_DATA_DIR="$data_dir"; P_CONFIG_DIR="$config_dir"; P_DESKTOP="$desktop"; P_CLI="$cli"
+
+  # Check for clashes before writing anything.
+  if [ "$desktop" = 1 ]; then
+    app="$(find_claude_app)"
+    if [ -e "$(launcher_path)" ] && ! is_managed_launcher "$(launcher_path)"; then
+      die "$(pretty "$(launcher_path)") exists and was not made by claude-profiles; pick another --label"
+    fi
+  fi
+  if [ "$cli" = 1 ] && [ -e "$(wrapper_path)" ] && ! is_managed_file "$(wrapper_path)"; then
+    die "$(pretty "$(wrapper_path)") exists and was not made by claude-profiles"
+  fi
+
+  save_profile
+  if [ "$desktop" = 1 ]; then
+    build_launcher "$app"
+    ok "Desktop: $(pretty "$(launcher_path)")"
+  fi
+  if [ "$cli" = 1 ]; then
+    install_wrapper
+    ok "CLI:     claude-$name  ($(pretty "$(wrapper_path)"))"
+  fi
+  say "  ${C_DIM}data:   $(pretty "$P_DATA_DIR")${C_RESET}"
+  say "  ${C_DIM}config: $(pretty "$P_CONFIG_DIR")${C_RESET}"
+  if [ "$cli" = 1 ] && ! bin_on_path; then
+    warn "$(pretty "$BIN_DIR") is not on your PATH. Add this line to ~/.zshrc:  $(path_hint)"
+  fi
+  if [ "$default" = 0 ]; then
+    say ""
+    say "Next: open ${C_BOLD}Claude $label${C_RESET} and sign in. For the CLI run ${C_BOLD}claude-$name${C_RESET} and use /login."
+  fi
+}
+
+cmd_list() {
+  local name any=0
+  for name in $(profile_names); do
+    if [ "$any" = 0 ]; then
+      printf '%s%-14s %-22s %-11s %-20s %s%s\n' "$C_BOLD" "PROFILE" "DESKTOP APP" "BADGE" "CLI COMMAND" "CLI ACCOUNT" "$C_RESET"
+      any=1
+    fi
+    load_profile "$name"
+    local appname="-" cmd="-" acct
+    [ "$P_DESKTOP" = 1 ] && appname="Claude $P_LABEL"
+    [ "$P_CLI" = 1 ] && cmd="claude-$P_NAME"
+    acct="$(cli_account || true)"; [ -n "$acct" ] || acct="-"
+    printf '%-14s %-22s %-11s %-20s %s\n' "$P_NAME$( [ "$P_DEFAULT" = 1 ] && printf ' *')" "$appname" "$P_LETTER #$P_COLOR" "$cmd" "$acct"
+  done
+  if [ "$any" = 0 ]; then
+    say "No profiles yet. Start with:  claude-profiles add work --default && claude-profiles add personal"
+  else
+    say "${C_DIM}* uses Claude's normal folders${C_RESET}"
+  fi
+}
+
+cmd_open() {
+  [ $# -eq 1 ] || die "usage: claude-profiles open <name>"
+  load_profile "$1"
+  [ "$P_DESKTOP" = 1 ] || die "profile '$1' has no Desktop launcher"
+  local l; l="$(launcher_path)"
+  [ -f "$l/Contents/Resources/launch.sh" ] || die "launcher missing; run: claude-profiles refresh $1"
+  /bin/bash "$l/Contents/Resources/launch.sh"
+}
+
+cmd_refresh() {
+  local names name app=""
+  if [ $# -gt 0 ]; then names="$*"; else names="$(profile_names)"; fi
+  [ -n "$names" ] || { say "No profiles to refresh."; return 0; }
+  for name in $names; do
+    load_profile "$name"
+    if [ "$P_DESKTOP" = 1 ]; then
+      [ -n "$app" ] || app="$(find_claude_app)"
+      build_launcher "$app"
+    fi
+    [ "$P_CLI" = 1 ] && install_wrapper
+    ok "refreshed $name"
+  done
+}
+
+cmd_remove() {
+  local name="" purge=0 yes=0 reply
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --purge) purge=1 ;;
+      --yes|-y) yes=1 ;;
+      -*) die "unknown option: $1" ;;
+      *) name="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$name" ] || die "usage: claude-profiles remove <name> [--purge --yes]"
+  load_profile "$name"
+
+  if [ "$purge" = 1 ]; then
+    if [ "$P_DEFAULT" = 1 ] || uses_stock_data || uses_stock_config; then
+      die "refusing to purge Claude's normal folders; remove without --purge"
+    fi
+    if [ "$yes" = 0 ]; then
+      [ -t 0 ] || die "--purge needs --yes when not run interactively"
+      printf 'Delete %s and %s for good? Type the profile name to confirm: ' "$(pretty "$P_DATA_DIR")" "$(pretty "$P_CONFIG_DIR")"
+      IFS= read -r reply
+      [ "$reply" = "$name" ] || die "not confirmed; nothing deleted"
+    fi
+  fi
+
+  local exe app pid
+  if app="$(find_claude_app 2>/dev/null)" && exe="$(app_executable "$app")"; then
+    if uses_stock_data; then pid="$(running_pid "$exe" "")"; else pid="$(running_pid "$exe" "$P_DATA_DIR")"; fi
+    [ -z "$pid" ] || warn "Claude $P_LABEL is still running (pid $pid); quit it to finish cleanly"
+  fi
+
+  if [ -e "$(launcher_path)" ]; then
+    if is_managed_launcher "$(launcher_path)"; then
+      [ -x "$LSREGISTER" ] && "$LSREGISTER" -u "$(launcher_path)" >/dev/null 2>&1 || true
+      rm -rf "$(launcher_path)"; ok "removed $(pretty "$(launcher_path)")"
+    else warn "left $(pretty "$(launcher_path)") alone (not made by claude-profiles)"; fi
+  fi
+  if [ -e "$(wrapper_path)" ]; then
+    if is_managed_file "$(wrapper_path)"; then rm -f "$(wrapper_path)"; ok "removed $(pretty "$(wrapper_path)")"
+    else warn "left $(pretty "$(wrapper_path)") alone (not made by claude-profiles)"; fi
+  fi
+  if [ "$purge" = 1 ]; then
+    rm -rf "$P_DATA_DIR" "$P_CONFIG_DIR"
+    ok "deleted $(pretty "$P_DATA_DIR") and $(pretty "$P_CONFIG_DIR")"
+  else
+    say "  ${C_DIM}kept data: $(pretty "$P_DATA_DIR"), $(pretty "$P_CONFIG_DIR")${C_RESET}"
+  fi
+  rm -f "$(profile_file "$name")"
+  ok "profile '$name' removed"
+}
+
+cmd_doctor() {
+  local app="" exe="" problems=0 name pid cfg want t
+  say "${C_BOLD}claude-profiles $VERSION${C_RESET} on macOS $(sw_vers -productVersion) ($(uname -m))"
+  for t in osascript osacompile sips iconutil codesign plutil; do
+    command -v "$t" >/dev/null 2>&1 || { warn "missing system tool: $t"; problems=$((problems + 1)); }
+  done
+  if app="$(find_claude_app 2>/dev/null)"; then
+    ok "Claude Desktop $(app_version "$app") at $(pretty "$app")"
+    exe="$(app_executable "$app" || true)"
+  else
+    warn "Claude Desktop not found (https://claude.ai/download)"; problems=$((problems + 1))
+  fi
+  if PATH="$USER_PATH" command -v claude >/dev/null 2>&1; then
+    ok "Claude Code CLI: $(pretty "$(PATH="$USER_PATH" command -v claude)")"
+  else
+    say "  ${C_DIM}Claude Code CLI not found on PATH (only needed for claude-<name> commands)${C_RESET}"
+  fi
+  bin_on_path || { warn "$(pretty "$BIN_DIR") is not on your PATH. Add to ~/.zshrc:  $(path_hint)"; problems=$((problems + 1)); }
+
+  for name in $(profile_names); do
+    load_profile "$name"
+    say ""
+    say "${C_BOLD}$name${C_RESET}  (Claude $P_LABEL, badge $P_LETTER #$P_COLOR)$( [ "$P_DEFAULT" = 1 ] && printf ' - default folders')"
+    if [ "$P_DESKTOP" = 1 ]; then
+      if is_managed_launcher "$(launcher_path)" && codesign --verify "$(launcher_path)" >/dev/null 2>&1; then
+        ok "launcher $(pretty "$(launcher_path)")"
+      else
+        warn "launcher missing or broken - run: claude-profiles refresh $name"; problems=$((problems + 1))
+      fi
+      if [ -n "$exe" ]; then
+        if uses_stock_data; then pid="$(running_pid "$exe" "")"; else pid="$(running_pid "$exe" "$P_DATA_DIR")"; fi
+        if [ -n "$pid" ]; then
+          cfg="$(process_config_dir "$pid" || true)"
+          if uses_stock_config; then want=""; else want="$P_CONFIG_DIR"; fi
+          if [ "$cfg" = "$want" ]; then
+            ok "running (pid $pid), Code tab uses $(pretty "$P_CONFIG_DIR")"
+          else
+            warn "running (pid $pid) with CLAUDE_CONFIG_DIR=${cfg:-<unset>}; expected ${want:-<unset>}. Quit it and reopen from the launcher"
+            problems=$((problems + 1))
+          fi
+        else
+          say "  ${C_DIM}not running${C_RESET}"
+        fi
+      fi
+    fi
+    if [ "$P_CLI" = 1 ]; then
+      if is_managed_file "$(wrapper_path)"; then ok "command claude-$name"
+      else warn "command claude-$name missing - run: claude-profiles refresh $name"; problems=$((problems + 1)); fi
+      t="$(cli_account || true)"
+      if [ -n "$t" ]; then ok "CLI signed in as $t"; else say "  ${C_DIM}CLI not signed in yet (run claude-$name, then /login)${C_RESET}"; fi
+    fi
+  done
+  say ""
+  if [ "$problems" = 0 ]; then ok "all good"; else warn "$problems problem(s) found"; return 1; fi
+}
+
+main() {
+  [ "$(uname -s)" = "Darwin" ] || die "claude-profiles runs on macOS only"
+  [ "$(macos_major)" -ge 13 ] || die "claude-profiles needs macOS 13 or later"
+  local cmd="${1:-help}"
+  [ $# -gt 0 ] && shift
+  case "$cmd" in
+    add) cmd_add "$@" ;;
+    list|ls) cmd_list "$@" ;;
+    open) cmd_open "$@" ;;
+    refresh) cmd_refresh "$@" ;;
+    remove|rm) cmd_remove "$@" ;;
+    doctor) cmd_doctor "$@" ;;
+    version|--version|-v) say "claude-profiles $VERSION" ;;
+    help|--help|-h) usage ;;
+    *) die "unknown command: $cmd (see: claude-profiles help)" ;;
+  esac
+}
+
+main "$@"

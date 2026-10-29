@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: brew install shellcheck
+      - name: Lint
+        run: make lint
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Apple Silicon on macOS 14/15/26 and Intel on macOS 15.
+        os: [macos-14, macos-15, macos-26, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: brew install bats-core
+      - name: Environment
+        run: |
+          sw_vers
+          uname -m
+          /bin/bash --version | head -n 1
+      - name: Test
+        run: bats --print-output-on-failure test/
+      - name: Install from checkout
+        run: |
+          CLAUDE_PROFILES_PREFIX="$RUNNER_TEMP/prefix" ./install.sh
+          "$RUNNER_TEMP/prefix/bin/claude-profiles" version

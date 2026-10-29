@@ -13,7 +13,7 @@ Separate Claude Desktop apps and Claude Code CLI profiles for work, personal and
 ![Apple Silicon + Intel](https://img.shields.io/badge/Apple%20Silicon%20%2B%20Intel-supported-success)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-[Install](#install) · [Quick start](#quick-start) · [How it works](#how-it-works) · [FAQ](#faq) · [Contributing](CONTRIBUTING.md)
+[Website](https://dav-ayman.github.io/claude-profiles/) · [Install](#install) · [Quick start](#quick-start) · [How it works](#how-it-works) · [FAQ](#faq) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -46,11 +46,19 @@ Claude Desktop is signed in to one account at a time. If you have a work account
 
 ## Install
 
+With [Homebrew](https://brew.sh):
+
+```sh
+brew install dav-ayman/tap/claude-profiles
+```
+
+Or with the install script, which puts one file in `~/.local/bin` (no sudo):
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/dav-ayman/claude-profiles/main/install.sh | bash
 ```
 
-This installs one script to `~/.local/bin/claude-profiles` (no sudo). Prefer to read it first? See [`install.sh`](install.sh), or install from a clone:
+Prefer to read it first? See [`install.sh`](install.sh), or install from a clone:
 
 ```sh
 git clone https://github.com/dav-ayman/claude-profiles
@@ -183,6 +191,7 @@ macOS only for now. The same idea works on Windows (`--user-data-dir` plus `CLAU
 
 ```sh
 claude-profiles remove personal     # repeat per profile; add --purge --yes to delete its data too
+brew uninstall claude-profiles      # if installed with Homebrew, or:
 curl -fsSL https://raw.githubusercontent.com/dav-ayman/claude-profiles/main/install.sh | bash -s -- --uninstall
 ```
 

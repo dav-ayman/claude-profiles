@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude-profiles: run multiple Claude accounts on one Mac (Claude Desktop + Claude Code)</title>
+<meta name="description" content="Use work and personal Claude accounts side by side on macOS. claude-profiles gives each account its own Claude Desktop app and Claude Code CLI profile, with separate sign-ins, chats, MCP servers and settings. Free and open source.">
+<link rel="canonical" href="https://dav-ayman.github.io/claude-profiles/">
+<meta name="theme-color" content="#0E1424">
+<meta property="og:type" content="website">
+<meta property="og:title" content="claude-profiles: multiple Claude accounts on one Mac">
+<meta property="og:description" content="Separate Claude Desktop apps and Claude Code CLI profiles for work, personal and clients. Open source, no sudo, updates keep working.">
+<meta property="og:url" content="https://dav-ayman.github.io/claude-profiles/">
+<meta property="og:image" content="https://dav-ayman.github.io/claude-profiles/images/social-preview.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="claude-profiles: multiple Claude accounts on one Mac">
+<meta name="twitter:description" content="Separate Claude Desktop apps and Claude Code CLI profiles for work, personal and clients.">
+<meta name="twitter:image" content="https://dav-ayman.github.io/claude-profiles/images/social-preview.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23E07250'/%3E%3Ccircle cx='44' cy='44' r='16' fill='%232563EB' stroke='white' stroke-width='4'/%3E%3C/svg%3E">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "claude-profiles",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "macOS 14 or later",
+  "description": "Run multiple Claude accounts side by side on macOS: separate Claude Desktop apps and Claude Code CLI profiles for work, personal and clients.",
+  "url": "https://dav-ayman.github.io/claude-profiles/",
+  "downloadUrl": "https://github.com/dav-ayman/claude-profiles/releases/latest",
+  "softwareVersion": "1.0.0",
+  "license": "https://opensource.org/licenses/MIT",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "author": { "@type": "Person", "name": "David Ayman", "url": "https://github.com/dav-ayman" },
+  "codeRepository": "https://github.com/dav-ayman/claude-profiles"
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    { "@type": "Question", "name": "Can I use two Claude accounts at the same time on a Mac?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. claude-profiles starts a separate Claude Desktop instance per account, each with its own data folder, so a work and a personal account can be signed in side by side." } },
+    { "@type": "Question", "name": "Does claude-profiles modify Claude Desktop?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. Claude.app is never changed, copied or re-signed. Launchers start it with --user-data-dir and CLAUDE_CONFIG_DIR, so auto-updates keep working." } },
+    { "@type": "Question", "name": "Does it work with Claude Code?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. Every profile also gets a claude-<name> command that runs Claude Code with its own CLAUDE_CONFIG_DIR, and Claude Desktop's Code tab uses the same folder." } }
+  ]
+}
+</script>
+<style>
+  :root {
+    --bg: #FFFFFF; --bg-soft: #F6F7FB; --card: #FFFFFF; --text: #0F172A; --muted: #556074;
+    --line: #E3E7EF; --accent: #D9653F; --accent-2: #2563EB; --green: #16A34A;
+    --code-bg: #0B1020; --code-text: #E6E9F2; --hero-a: #0E1424; --hero-b: #1B1530;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0B0F1A; --bg-soft: #111727; --card: #131A2B; --text: #E8EBF3; --muted: #A2AABD;
+      --line: #232B40; --code-bg: #070A12;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent-2); }
+  code, pre { font-family: SFMono-Regular, Menlo, Consolas, monospace; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+
+  header.hero {
+    background: radial-gradient(1200px 500px at 80% -10%, #3A2550 0%, transparent 60%),
+                linear-gradient(135deg, var(--hero-a), var(--hero-b));
+    color: #fff; padding: 22px 0 72px;
+  }
+  nav { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  nav .brand { font-weight: 800; color: #fff; text-decoration: none; letter-spacing: -0.3px; }
+  nav .links { display: flex; gap: 18px; flex-wrap: wrap; }
+  nav .links a { color: #C9CFE0; text-decoration: none; font-size: 15px; }
+  nav .links a:hover { color: #fff; }
+  .hero-grid { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 40px; align-items: center; margin-top: 56px; }
+  .hero-grid > *, .problem > *, .grid > *, .step > * { min-width: 0; }
+  h1 { font-size: clamp(36px, 5.2vw, 58px); line-height: 1.05; letter-spacing: -1.5px; margin: 0 0 18px; }
+  .lede { font-size: 20px; color: #C9CFE0; margin: 0 0 28px; max-width: 34em; }
+  .install { background: var(--code-bg); border: 1px solid rgba(255,255,255,0.14); border-radius: 14px; overflow: hidden; }
+  .tabs { display: flex; border-bottom: 1px solid rgba(255,255,255,0.1); }
+  .tabs button {
+    background: none; border: 0; color: #A2AABD; padding: 10px 16px; font: inherit; font-size: 14px; cursor: pointer;
+  }
+  .tabs button[aria-selected="true"] { color: #fff; box-shadow: inset 0 -2px 0 var(--accent); }
+  .cmd { display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
+  .cmd code { color: var(--code-text); font-size: 15px; overflow-x: auto; white-space: nowrap; flex: 1; }
+  .cmd code::before { content: "$ "; color: #7EE787; }
+  .copy {
+    flex: none; background: rgba(255,255,255,0.1); color: #fff; border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .copy:hover { background: rgba(255,255,255,0.18); }
+  .cta { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 22px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; padding: 11px 18px; border-radius: 10px;
+    font-weight: 600; text-decoration: none; font-size: 16px;
+  }
+  .btn.primary { background: #fff; color: #0E1424; }
+  .btn.ghost { color: #fff; border: 1px solid rgba(255,255,255,0.3); }
+  .hero-art img { width: 100%; height: auto; border-radius: 18px; box-shadow: 0 30px 60px rgba(0,0,0,0.45); }
+  .meta { color: #8E96AE; font-size: 14px; margin-top: 14px; }
+
+  section { padding: 72px 0; }
+  section.soft { background: var(--bg-soft); }
+  h2 { font-size: clamp(28px, 3.4vw, 38px); letter-spacing: -0.8px; margin: 0 0 12px; line-height: 1.15; }
+  .sub { color: var(--muted); font-size: 18px; margin: 0 0 36px; max-width: 42em; }
+  .demo img { width: 100%; height: auto; border-radius: 14px; border: 1px solid var(--line); display: block; }
+
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 22px; }
+  .card h3 { margin: 6px 0 6px; font-size: 18px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15.5px; }
+  .card .ico { font-size: 24px; }
+
+  .problem { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .problem .card ul { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
+  .problem .bad h3 { color: #DC2626; }
+  .problem .good h3 { color: var(--green); }
+
+  .steps { counter-reset: step; display: grid; gap: 14px; max-width: 760px; }
+  .step { display: grid; grid-template-columns: 44px 1fr; gap: 14px; align-items: start; }
+  .step::before {
+    counter-increment: step; content: counter(step); width: 36px; height: 36px; border-radius: 50%;
+    background: var(--accent); color: #fff; font-weight: 800; display: grid; place-items: center;
+  }
+  .step p { margin: 6px 0 0; }
+  pre.block {
+    background: var(--code-bg); color: var(--code-text); padding: 16px 18px; border-radius: 12px;
+    overflow-x: auto; font-size: 14.5px; margin: 10px 0 0;
+  }
+  .diagram img { width: 100%; height: auto; border-radius: 16px; }
+  .launchers img { width: 100%; max-width: 760px; height: auto; display: block; margin: 0 auto; border-radius: 16px; }
+
+  details { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; margin-bottom: 10px; }
+  summary { cursor: pointer; font-weight: 600; }
+  details p { color: var(--muted); margin: 10px 0 0; }
+
+  footer { border-top: 1px solid var(--line); padding: 36px 0 48px; color: var(--muted); font-size: 14px; }
+  footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+
+  @media (max-width: 860px) {
+    .hero-grid, .problem { grid-template-columns: 1fr; }
+    .grid { grid-template-columns: 1fr; }
+    .hero-art { order: -1; }
+    nav .links a.hide-sm { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <nav>
+      <a class="brand" href="#">claude-profiles</a>
+      <div class="links">
+        <a href="#how" class="hide-sm">How it works</a>
+        <a href="#faq" class="hide-sm">FAQ</a>
+        <a href="https://github.com/dav-ayman/claude-profiles">GitHub</a>
+      </div>
+    </nav>
+
+    <div class="hero-grid">
+      <div>
+        <h1>Multiple Claude accounts. One Mac. No signing out.</h1>
+        <p class="lede">Run your work and personal Claude side by side. Each account gets its own Claude Desktop app and its own Claude Code command, with separate sign-ins, chats, MCP servers and settings.</p>
+
+        <div class="install" role="region" aria-label="Install command">
+          <div class="tabs" role="tablist">
+            <button role="tab" aria-selected="true" data-cmd="brew install dav-ayman/tap/claude-profiles">Homebrew</button>
+            <button role="tab" aria-selected="false" data-cmd="curl -fsSL https://raw.githubusercontent.com/dav-ayman/claude-profiles/main/install.sh | bash">curl</button>
+          </div>
+          <div class="cmd">
+            <code id="cmd">brew install dav-ayman/tap/claude-profiles</code>
+            <button class="copy" id="copy" type="button">Copy</button>
+          </div>
+        </div>
+
+        <div class="cta">
+          <a class="btn primary" href="https://github.com/dav-ayman/claude-profiles">★ Star on GitHub</a>
+          <a class="btn ghost" href="#start">Quick start</a>
+        </div>
+        <p class="meta">Free and open source (MIT) · macOS 14+ · Apple Silicon and Intel · no sudo</p>
+      </div>
+      <div class="hero-art">
+        <img src="images/launchers.png" width="1200" height="420" alt="Claude Work, Claude Personal and Claude Client X launchers with colored letter badges">
+      </div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section>
+    <div class="wrap">
+      <h2>Stop juggling one Claude login</h2>
+      <p class="sub">Claude Desktop is signed in to one account at a time. If you have a work account and a personal one, everything ends up in the same place.</p>
+      <div class="problem">
+        <div class="card bad">
+          <h3>Without it</h3>
+          <ul>
+            <li>Sign out, sign in, repeat</li>
+            <li>Work and personal chats in one history</li>
+            <li>One set of MCP servers and connectors for everything</li>
+            <li>Claude Code hooks, plugins and tracing shared across accounts</li>
+          </ul>
+        </div>
+        <div class="card good">
+          <h3>With claude-profiles</h3>
+          <ul>
+            <li><b>Claude Work</b> and <b>Claude Personal</b> open at the same time</li>
+            <li><code>claude-work</code> and <code>claude-personal</code> in the terminal</li>
+            <li>Each profile keeps its own sign-in, chats, MCP config and settings</li>
+            <li>Your current setup stays exactly as it is</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="soft" id="start">
+    <div class="wrap">
+      <h2>Set up in a minute</h2>
+      <p class="sub">Two commands, then sign in once in each place.</p>
+      <div class="steps">
+        <div class="step"><div><b>Turn your current Claude into a profile and add a second one</b>
+          <pre class="block">claude-profiles add work --default   # your current Claude becomes "Claude Work"
+claude-profiles add personal         # a second, fully separate profile</pre></div></div>
+        <div class="step"><div><b>Open "Claude Personal" and sign in</b><p>It's in Spotlight, Launchpad and <code>~/Applications</code>. Drag both launchers to your Dock.</p></div></div>
+        <div class="step"><div><b>Sign in the CLI once</b><p>Run <code>claude-personal</code> and type <code>/login</code>. Check everything with <code>claude-profiles doctor</code>.</p></div></div>
+      </div>
+      <div class="demo" style="margin-top:36px">
+        <img src="images/demo.gif" width="1240" height="700" loading="lazy" alt="Terminal demo: adding work and personal profiles with claude-profiles">
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Built to be boring in the best way</h2>
+      <p class="sub">Small, safe and easy to remove. Nothing about Claude itself changes.</p>
+      <div class="grid">
+        <div class="card"><div class="ico">🖥️</div><h3>Desktop + CLI</h3><p>One profile gives you a Desktop launcher and a Claude Code command. Desktop's Code tab follows the profile too.</p></div>
+        <div class="card"><div class="ico">🔄</div><h3>Updates keep working</h3><p>Claude.app is never modified, copied or re-signed. One update covers every profile.</p></div>
+        <div class="card"><div class="ico">🏷️</div><h3>Badged icons</h3><p>A colored letter badge on each launcher, drawn on your Mac from your own Claude icon.</p></div>
+        <div class="card"><div class="ico">🎯</div><h3>One window per profile</h3><p>Clicking a launcher again brings that profile forward instead of opening a duplicate.</p></div>
+        <div class="card"><div class="ico">🛡️</div><h3>Safe by design</h3><p>No sudo, no network at run time, never deletes files it didn't create.</p></div>
+        <div class="card"><div class="ico">🍎</div><h3>Nothing to install</h3><p>Uses only what ships with macOS. Tested on macOS 14, 15 and 26, Apple Silicon and Intel.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="soft" id="how">
+    <div class="wrap">
+      <h2>How it works</h2>
+      <p class="sub">Claude Desktop keeps its state in one data folder and Claude Code keeps its own in <code>CLAUDE_CONFIG_DIR</code>. Each profile simply points both at its own folders.</p>
+      <div class="diagram"><img src="images/how-it-works.svg" width="1200" height="560" loading="lazy" alt="Launchers and CLI commands start the same unmodified Claude with separate data and config folders"></div>
+    </div>
+  </section>
+
+  <section id="faq">
+    <div class="wrap">
+      <h2>FAQ</h2>
+      <p class="sub">The questions people usually ask first.</p>
+      <details><summary>Can I use two Claude accounts at the same time on a Mac?</summary><p>Yes. Each profile runs its own Claude Desktop instance with its own data folder, so a work and a personal account can be signed in side by side.</p></details>
+      <details><summary>Does it modify Claude Desktop?</summary><p>No. The launchers start the Claude.app you already have with <code>--user-data-dir</code> and <code>CLAUDE_CONFIG_DIR</code>. That's also why auto-updates keep working.</p></details>
+      <details><summary>Will I lose my current chats or sign-in?</summary><p>No. <code>claude-profiles add work --default</code> uses the folders Claude already uses, so nothing moves.</p></details>
+      <details><summary>Why does the Dock say "Claude" for every running window?</summary><p>All windows come from the same Claude.app. Renaming it would break its signature and updates, so you click the badged launchers instead.</p></details>
+      <details><summary>Is it safe?</summary><p>It runs as you without sudo, makes no network calls and never reads your tokens. Each profile signs in by itself inside Claude.</p></details>
+      <details><summary>Windows or Linux?</summary><p>macOS only for now. Windows support is a great first contribution.</p></details>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap row">
+    <div>© 2026 David Ayman · <a href="https://github.com/dav-ayman/claude-profiles/blob/main/LICENSE">MIT License</a> · <a href="https://github.com/dav-ayman/claude-profiles">Source on GitHub</a></div>
+    <div>Independent community project, not affiliated with or endorsed by Anthropic. Claude is a trademark of Anthropic, PBC.</div>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var code = document.getElementById('cmd');
+    var tabs = document.querySelectorAll('.tabs button');
+    tabs.forEach(function (tab) {
+      tab.addEventListener('click', function () {
+        tabs.forEach(function (t) { t.setAttribute('aria-selected', String(t === tab)); });
+        code.textContent = tab.getAttribute('data-cmd');
+      });
+    });
+    var copy = document.getElementById('copy');
+    copy.addEventListener('click', function () {
+      var done = function () { copy.textContent = 'Copied'; setTimeout(function () { copy.textContent = 'Copy'; }, 1500); };
+      if (navigator.clipboard) navigator.clipboard.writeText(code.textContent).then(done, function () {});
+    });
+  })();
+</script>
+</body>
+</html>

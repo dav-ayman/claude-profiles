@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="claude-profiles logo">
+  <title>claude-profiles</title>
+  <!-- three stacked profile cards -->
+  <rect x="4" y="4" width="36" height="36" rx="10" fill="#2563EB"/>
+  <rect x="14" y="14" width="36" height="36" rx="10" fill="#16A34A" stroke="#FFFFFF" stroke-width="3"/>
+  <rect x="24" y="24" width="36" height="36" rx="10" fill="#E07250" stroke="#FFFFFF" stroke-width="3"/>
+  <path d="M33 37h18M33 44h12" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round"/>
+</svg>

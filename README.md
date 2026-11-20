@@ -42,7 +42,7 @@ Claude Desktop is signed in to one account at a time. If you have a work account
 - 🔄 **Updates keep working.** Claude.app is never modified, re-signed or copied, so auto-updates go on as usual.
 - 🧼 **Keeps your current setup.** `--default` turns your existing sign-in into a profile without moving anything.
 - 🛡️ **Safe by design.** No sudo, no network at run time, never deletes files it didn't create, never runs profile files as code.
-- 🍎 **Nothing to install.** Needs only what ships with macOS (bash 3.2, osascript, sips, codesign). Tested on macOS 14, 15 and 26, Apple Silicon and Intel.
+- 🍎 **Nothing to install.** Needs only what ships with macOS (bash 3.2, osascript, sips, codesign). Tested on macOS 15 and 26, Apple Silicon and Intel, and works on macOS 14.
 
 ## Install
 

@@ -26,7 +26,7 @@ The tests never touch your real Claude or profiles. Each test gets a throwaway `
 
 1. Open an issue first for bigger changes, so we can agree on the approach.
 2. Add or update a test in `test/claude-profiles.bats` for any behavior change.
-3. `make lint test` must pass. CI runs on macOS 14, 15 and 26 (Apple Silicon) and macOS 15 (Intel).
+3. `make lint test` must pass. CI runs on macOS 15 and 26 (Apple Silicon) and macOS 15 (Intel).
 4. Update `README.md` and `CHANGELOG.md` when users would notice the change.
 
 ## Ideas we'd love help with

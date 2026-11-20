@@ -17,7 +17,7 @@ jobs:
   lint:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install shellcheck
         run: brew install shellcheck
       - name: Lint
@@ -28,12 +28,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Apple Silicon on macOS 14/15/26 and Intel on macOS 15.
-        os: [macos-14, macos-15, macos-26, macos-15-intel]
+        # Apple Silicon on macOS 15/26 and Intel on macOS 15. GitHub retired its
+        # macOS 14 runners on 2 Nov 2026; 1.0.0 passed there before that.
+        os: [macos-15, macos-26, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install bats
         run: brew install bats-core
       - name: Environment
